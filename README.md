@@ -15,7 +15,7 @@ Through hands-on implementation and detailed explanations, learn how to build a 
 
 The book is available on:
 
-* [Amazon](https://www.amazon.com/) *(Coming soon)*
+* [Amazon](https://www.amazon.com/) *(https://www.amazon.com/dp/B0G64SQ4F8/)*
 * [Gumroad](https://gumroad.com/) *(https://plakhera.gumroad.com/l/BuildingASmallLanguageModelfromScratch)*
 * [LeanPub](https://leanpub.com/) *(https://leanpub.com/buildingasmalllanguagemodelfromscratch )*
 
