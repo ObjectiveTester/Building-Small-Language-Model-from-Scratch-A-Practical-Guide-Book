@@ -51,8 +51,19 @@ if not os.path.exists("train.bin"):
 # Training Configuration (needed for get_batch function)
 batch_size = 32
 block_size = 128
-device = "cuda" if torch.cuda.is_available() else "cpu"
-device_type = 'cuda' if 'cuda' in device else 'cpu'
+
+# Determine device: CUDA > MPS > CPU
+if torch.cuda.is_available():
+    device = "cuda"
+    device_type = 'cuda'
+elif torch.backends.mps.is_available():
+    device = "mps"
+    device_type = 'mps'
+else:
+    device = "cpu"
+    device_type = 'cpu'
+
+print(f"Using device: {device}")
 
 # Optimized batch loading for Qwen3
 def get_batch(split):
@@ -267,6 +278,9 @@ class Qwen3Model(nn.Module):
         return idx
 
 # Qwen3 Configuration
+# Note: MPS does not support bfloat16, so we use float16 for MPS
+model_dtype = torch.bfloat16 if device_type != 'mps' else torch.float16
+
 QWEN3_CONFIG = {
     "vocab_size": 151646,  # Qwen3 vocab size
     "d_model": 640,
@@ -275,7 +289,7 @@ QWEN3_CONFIG = {
     "n_layers": 18,
     "d_ff": 2048,
     "max_seq_len": 32768,
-    "dtype": torch.bfloat16,
+    "dtype": model_dtype,
 }
 
 torch.manual_seed(123)
@@ -318,7 +332,19 @@ scheduler_warmup = LinearLR(optimizer, total_iters=warmup_steps)
 scheduler_decay = CosineAnnealingLR(optimizer, T_max=max_iters - warmup_steps, eta_min=min_lr)
 scheduler = SequentialLR(optimizer, schedulers=[scheduler_warmup, scheduler_decay], milestones=[warmup_steps])
 
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+# GradScaler: Only use CUDA's GradScaler (not available for MPS or CPU)
+if device_type == 'cuda':
+    scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
+else:
+    # For MPS and CPU, use a no-op scaler
+    class NoOpScaler:
+        def scale(self, loss):
+            return loss
+        def step(self, optimizer):
+            optimizer.step()
+        def update(self):
+            pass
+    scaler = NoOpScaler()
 
 # Training Loop
 best_val_loss = float('inf')
@@ -352,24 +378,34 @@ for epoch in tqdm(range(max_iters)):
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
-    scheduler.step()
+        scheduler.step()
 
 # Plot training and validation loss
 train_loss_list_converted = [i.cpu().detach() for i in train_loss_list]
 validation_loss_list_converted = [i.cpu().detach() for i in validation_loss_list]
 
+plt.figure(figsize=(10, 6))
 plt.plot(train_loss_list_converted, 'g', label='train_loss')
 plt.plot(validation_loss_list_converted, 'r', label='validation_loss')
 plt.xlabel("Steps - Every 500 epochs")
 plt.ylabel("Loss")
 plt.legend()
-plt.show()
+plt.tight_layout()
+
+# Save the plot to a file
+plt.savefig('training_loss_plot.png', dpi=100, bbox_inches='tight')
+print("Plot saved as 'training_loss_plot.png'")
+
+# Try to show the plot (may not work in non-interactive environments)
+if plt.get_backend() != "agg":
+    plt.show()
+else:
+    print("Plot display skipped")
 
 # Load the best model and generate text
 model = Qwen3Model(**QWEN3_CONFIG)
-device = "cuda" if torch.cuda.is_available() else "cpu"
-best_model_params_path = "best_model_params.pt"
 model.load_state_dict(torch.load(best_model_params_path, map_location=torch.device(device)))
+model = model.to(device)
 
 sentence = "Once upon a time there was a pumpkin."
 context = torch.tensor(tokenizer.encode(sentence, add_special_tokens=False)).unsqueeze(dim=0)
