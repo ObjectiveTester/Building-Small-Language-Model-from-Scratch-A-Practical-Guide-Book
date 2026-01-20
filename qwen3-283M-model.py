@@ -74,6 +74,7 @@ def get_batch(split):
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    # pin_memory is only beneficial for CUDA, not for MPS or CPU
     if device_type == 'cuda':
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
@@ -278,8 +279,9 @@ class Qwen3Model(nn.Module):
         return idx
 
 # Qwen3 Configuration
-# Note: MPS does not support bfloat16, so we use float16 for MPS
-model_dtype = torch.bfloat16 if device_type != 'mps' else torch.float16
+# Note: MPS autocast only supports bfloat16 and float16, so we use float16 for MPS with autocast
+# For model weights, we still use float32 for stability, but autocast will use float16 for computations
+model_dtype = torch.bfloat16 if device_type == 'cuda' else torch.float32
 
 QWEN3_CONFIG = {
     "vocab_size": 151646,  # Qwen3 vocab size
@@ -317,14 +319,31 @@ warmup_steps = 1000
 min_lr = 5e-4
 eval_iters = 500
 gradient_accumulation_steps = 32
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 
-ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+# Determine dtype and AMP support based on device
+if device_type == 'cuda' and torch.cuda.is_bf16_supported():
+    autocast_dtype = 'bfloat16'
+elif device_type == 'mps':
+    # MPS autocast only supports float16 and bfloat16
+    autocast_dtype = 'float16'
+else:
+    # CPU doesn't need autocast, but we'll use float16 as fallback
+    autocast_dtype = 'float16'
+
+autocast_ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[autocast_dtype]
+
+print(f"dtype: {autocast_dtype}")
+print(f"ptdtype: {autocast_ptdtype}")
+
+# Setup autocast context based on device capabilities
+if device_type == 'cpu':
+    ctx = nullcontext()
+else:
+    # Both CUDA and MPS support autocast
+    ctx = torch.amp.autocast(device_type=device_type, dtype=autocast_ptdtype)
 
 torch.set_default_device(device)
 torch.manual_seed(42)
-
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, betas=(0.9, 0.95), weight_decay=0.1, eps=1e-9)
 
@@ -334,7 +353,7 @@ scheduler = SequentialLR(optimizer, schedulers=[scheduler_warmup, scheduler_deca
 
 # GradScaler: Only use CUDA's GradScaler (not available for MPS or CPU)
 if device_type == 'cuda':
-    scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
+    scaler = torch.amp.GradScaler('cuda', enabled=(autocast_dtype == 'float16'))
 else:
     # For MPS and CPU, use a no-op scaler
     class NoOpScaler:
