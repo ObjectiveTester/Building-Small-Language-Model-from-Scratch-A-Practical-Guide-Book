@@ -322,25 +322,22 @@ gradient_accumulation_steps = 32
 
 # Determine dtype and AMP support based on device
 if device_type == 'cuda' and torch.cuda.is_bf16_supported():
-    autocast_dtype = 'bfloat16'
-elif device_type == 'mps':
-    # MPS autocast only supports float16 and bfloat16
-    autocast_dtype = 'float16'
+    dtype = 'bfloat16'
+elif device_type == 'mps' and torch.backends.mps.is_macos_or_newer(14, 0):
+    dtype = 'bfloat16'
 else:
-    # CPU doesn't need autocast, but we'll use float16 as fallback
-    autocast_dtype = 'float16'
+    dtype = 'float32'
 
-autocast_ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[autocast_dtype]
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 
-print(f"dtype: {autocast_dtype}")
-print(f"ptdtype: {autocast_ptdtype}")
+print(f"dtype: {dtype}")
 
 # Setup autocast context based on device capabilities
 if device_type == 'cpu':
     ctx = nullcontext()
 else:
     # Both CUDA and MPS support autocast
-    ctx = torch.amp.autocast(device_type=device_type, dtype=autocast_ptdtype)
+    ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 torch.set_default_device(device)
 torch.manual_seed(42)
@@ -352,10 +349,10 @@ scheduler_decay = CosineAnnealingLR(optimizer, T_max=max_iters - warmup_steps, e
 scheduler = SequentialLR(optimizer, schedulers=[scheduler_warmup, scheduler_decay], milestones=[warmup_steps])
 
 # GradScaler: Only use CUDA's GradScaler (not available for MPS or CPU)
-if device_type == 'cuda':
-    scaler = torch.amp.GradScaler('cuda', enabled=(autocast_dtype == 'float16'))
+if device_type == 'cuda' and dtype == 'float16':
+    scaler = torch.amp.GradScaler(enabled=True)
 else:
-    # For MPS and CPU, use a no-op scaler
+    # For anything else use a no-op scaler
     class NoOpScaler:
         def scale(self, loss):
             return loss
